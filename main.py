@@ -147,7 +147,7 @@ def delete_memepages_from_chat_info(context: CallbackContext, pages_to_delete: s
         reply_str = reply_str[:-2] + " не были удалены, потому что их не было в списке"
     return reply_str
 
-def check_memepages_existence(memepages: set) -> list:
+def existing_pages(memepages: set) -> list:
     """The function returns a list of existing pages from the given set
     """
     
