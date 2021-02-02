@@ -1,3 +1,4 @@
+import requests
 from telegram import Update
 from telegram.ext import (
     Updater,
@@ -22,63 +23,76 @@ def get_token(token_purpose: str) -> str:
     token_file.close()
     return return_value
 
+def vk_query_response(method: str, **params) -> dict:
+    query = f"https://api.vk.com/method/{method}?v=5.122&access_token={vk_api_token}"
+    for key, value in params.items():
+        query += f"&{key}={value}"
+    return requests.get(query).json()
+
 def show_help(update: Update, context: CallbackContext) -> None:
-    update.message.reply_markdown(
-        """Ниже под страницей подразумевается какая-либо публичная страница ВКонтакте. В последующих обновлениях при необходимости будут добавляться и другие платформы.\n*Список команд:*
-    */meme* - Прислать мем
-    */memepages* - Показать список страниц, из которых я могу присылать мемы в эту беседу
-    */memepages_add* - Добавление страниц(-ы) в список. После вызова этой команды пришлите список коротких имен страниц через пробел
-    */memepages_remove* - Удалить страницу(-ы) из списка. После вызова этой команды пришлите список коротких имен страниц через пробел
-    */memepages_truncate* - Полностью очистить список страниц, из которых я могу присылать мемы в эту беседу""",
+    update.message.reply_text(
+        """Ниже под страницей подразумевается какая-либо публичная страница ВКонтакте. В последующих обновлениях при необходимости будут добавляться и другие платформы.\nСписок команд:
+        /meme - Прислать мем
+        /memepages - Показать список страниц, из которых я могу присылать мемы в эту беседу
+        /memepages_add - Добавление страниц(-ы) в список. После вызова этой команды пришлите список коротких имен страниц через пробел
+        /memepages_remove - Удалить страницу(-ы) из списка. После вызова этой команды пришлите список коротких имен страниц через пробел
+        /memepages_truncate - Полностью очистить список страниц, из которых я могу присылать мемы в эту беседу""",
         quote=True
     )
 
 def send_meme(update: Update, context: CallbackContext) -> None:
     pass
 
-def show_memepages(update: Update, context: CallbackContext) -> None:
-    index = 1
-    reply_message = ""
+def get_pages_info(screen_names: set) -> list:
+    response = vk_query_response(
+        "groups.getById",
+        group_ids=",".join([name for name in screen_names])
+    )
     try:
-        for page in context.chat_data["memepages"]:
-            reply_message += f"{index}) *{page}*\n"
-            index += 1
+        return response["response"]
+    except KeyError:
+        return []
+
+def show_memepages(update: Update, context: CallbackContext) -> None:
+    try:
+        full_names = {page_info["screen_name"] : page_info["name"] for page_info in get_pages_info(context.chat_data["memepages"])}
+        reply_message = "\n".join([f"{index+1}) {full_name} ({screen_name})" for index, (screen_name, full_name) in enumerate(full_names.items())])
     except KeyError:
         reply_message = "Список страниц пуст. Добавьте что-нибудь, иначе я не смогу ничего отправлять"
-    update.message.reply_markdown(
+    update.message.reply_text(
         reply_message,
         quote=True
     )
 
 def add_memepages(update: Update, context: CallbackContext) -> None:
     context.chat_data["adding_user_id"] = update.effective_user.id
-    update.message.reply_markdown(
-        "Отправьте короткие имена страниц *через пробел*, которых вы хотите добавить (короткие имена могут быть найдены в ссылке на страницу)",
+    update.message.reply_text(
+        "Отправьте короткие имена страниц через пробел, которых вы хотите добавить (короткие имена могут быть найдены в ссылке на страницу)",
         quote=True
     )
 
 def remove_memepages(update: Update, context: CallbackContext) -> None:
     if "memepages" not in context.chat_data.keys():
-        update.message.reply_markdown(
+        update.message.reply_text(
             "Чтобы удалять страницы, для начала их нужно добавить, а список пуст",
             quote=True
         )
         return
     context.chat_data["deleting_user_id"] = update.effective_user.id
-    update.message.reply_markdown(
-        "Отправьте короткие имена страниц *через пробел*, которых вы хотите удалить (если не знаете, можете уточнить имена страниц командой /memepages)",
+    update.message.reply_text(
+        "Отправьте короткие имена страниц через пробел, которых вы хотите удалить (если не знаете, можете уточнить имена страниц командой /memepages)",
         quote=True
     )
 
 def truncate_memepages(update: Update, context: CallbackContext) -> None:
     if "memepages" not in context.chat_data.keys():
-        update.message.reply_markdown(
+        update.message.reply_text(
             "Чтобы очищать список, он не должен быть пустой",
             quote=True
         )
         return
     context.chat_data.pop("memepages", None)
-    update.message.reply_markdown(
+    update.message.reply_text(
         "Список страниц был очищен",
         quote=True
     )
@@ -100,59 +114,83 @@ def memepages_modifying_type(update: Update, context: CallbackContext) -> str:
 def add_memepages_to_chat_info(context: CallbackContext, pages_to_add: set) -> str:
     """Function returns a reply that bot sends to user
     """
-
-    added_pages = set()
     if "memepages" not in context.chat_data.keys():
-        context.chat_data["memepages"] = []
-    for page in pages_to_add:
-        if page not in context.chat_data["memepages"]:
-            context.chat_data["memepages"].append(page)
-            added_pages.add(page)
-    not_added_pages = pages_to_add.difference(added_pages)
+        context.chat_data["memepages"] = set()
+
+    #находим страницы, которые существуют в вк
+    exist_pages = existing_pages(pages_to_add)
+
+    #несуществующие страницы - те которыe есть в pages_to_add, но нет в exist_pages
+    nonexist_pages = pages_to_add.difference(exist_pages)
+
+    #недобавленные страницы - те, которые уже есть в context.chat_data["memepages"]
+    not_added_pages = exist_pages.intersection(context.chat_data["memepages"])
+
+    #добавленные страницы - те, которые есть в exist_pages но нет в context.chat_data["memepages"]
+    added_pages = exist_pages.difference(context.chat_data["memepages"])
+
+    #обновляем множество чатов через объединение с существующими
+    context.chat_data["memepages"].update(exist_pages)
+
+    #генерируем ответ одной строкой
     reply_str = ""
     if added_pages:
-        reply_str = "Добавлены страницы: "
-        for page in added_pages:
-            reply_str += f"{page}, "
-        reply_str = reply_str[:-2] + "\n"
+        reply_str += "{page_addition_case}: {list_of_pages}\n".format(
+            page_addition_case = "Добавлены страницы" if len(added_pages) > 1 else "Добавлена страница",
+            list_of_pages      = ", ".join([page for page in added_pages])
+        )
     if not_added_pages:
-        reply_str += "Страницы "
-        for page in not_added_pages:
-            reply_str += f"{page}, "
-        reply_str = reply_str[:-2] + " не были добавлены, потому что уже есть в списке"
+        reply_str += "{pages_case} {list_of_pages} {were_not_added_case}, потому что уже есть в списке\n".format(
+            pages_case          = "Страницы" if len(not_added_pages) > 1 else "Страница",
+            list_of_pages       = ", ".join([page for page in not_added_pages]),
+            were_not_added_case = "не были добавлены" if len(not_added_pages) > 1 else "не была добавлена"
+        )
+    if nonexist_pages:
+        reply_str += "{pages_case} {list_of_pages} не существует, проверьте правильность написания коротких имен".format(
+            pages_case    = "Страниц" if len(nonexist_pages) > 1 else "Страницы",
+            list_of_pages = ",".join([page for page in nonexist_pages])
+        )
     return reply_str
 
 def delete_memepages_from_chat_info(context: CallbackContext, pages_to_delete: set) -> str:
     """Function returns a reply that bot sends to user
     """
-    deleted_pages = set()
-    for page in pages_to_delete:
-        if page in context.chat_data["memepages"]:
-            context.chat_data["memepages"].remove(page)
-            deleted_pages.add(page)
+
+    #удаленные страницы - те, которые есть в context.chat_data["memepages"]
+    deleted_pages = pages_to_delete.intersection(context.chat_data["memepages"])
+
+    #неудаленные - те, которых нет в deleted_pages но есть в pages_to_delete
+    not_deleted_pages = pages_to_delete.difference(deleted_pages)
+
+    #обновляем множество чатов через разницу с теми, которые нужно удалить
+    context.chat_data["memepages"].difference_update(pages_to_delete)
 
     if not context.chat_data["memepages"]:
         context.chat_data.pop("memepages", None)
-    not_deleted_pages = pages_to_delete.difference(deleted_pages)
+
+    #генерируем ответ одной строкой
     reply_str = ""
     if deleted_pages:
-        reply_str = "Удалены страницы: "
-        for page in deleted_pages:
-            reply_str += f"{page}, "
-        reply_str = reply_str[:-2] + "\n"
+        reply_str += "{deleted_pages_case}: {pages_list}\n".format(
+            deleted_pages_case = "Удалены страницы" if len(deleted_pages) > 1 else "Удалена страница",
+            pages_list         = ", ".join([page for page in deleted_pages])
+        )
     if not_deleted_pages:
-        reply_str += "Страницы "
-        for page in not_deleted_pages:
-            reply_str += f"{page}, "
-        reply_str = reply_str[:-2] + " не были удалены, потому что их не было в списке"
+        reply_str += "{pages_case} {pages_list} {were_not_deleted_case}, потому что их не было в списке".format(
+            pages_case            = "Страницы" if len(not_deleted_pages) > 1 else "Страница",
+            pages_list            = ", ".join([page for page in not_deleted_pages]),
+            were_not_deleted_case = "не были удалены" if len(not_deleted_pages) > 1 else "не была удалена"
+        )
     return reply_str
 
-def existing_pages(memepages: set) -> list:
+def existing_pages(memepages: set) -> set:
     """The function returns a list of existing pages from the given set
     """
-    
-    #штуки с vk api, щас лень писать
-    pass
+    vk_api_response = vk_query_response("groups.getById", group_ids=",".join(memepages))
+    try:
+        return set([group["screen_name"] for group in vk_api_response["response"]])
+    except KeyError:
+        return set()
 
 def handle_text_message(update: Update, context: CallbackContext) -> None:
     message_text = update.effective_message.text
@@ -163,7 +201,7 @@ def handle_text_message(update: Update, context: CallbackContext) -> None:
         #добавить сюда проверку на существование всех страниц, которых нужно добавить
         context.chat_data.pop("adding_user_id", None)
         pages_to_add = set(message_text.split())
-        update.message.reply_markdown(
+        update.message.reply_text(
             add_memepages_to_chat_info(context, pages_to_add),
             quote=True
         )
@@ -171,7 +209,7 @@ def handle_text_message(update: Update, context: CallbackContext) -> None:
     elif modtype == "deleting":
         context.chat_data.pop("deleting_user_id", None)
         pages_to_delete = set(message_text.split())
-        update.message.reply_markdown(
+        update.message.reply_text(
             delete_memepages_from_chat_info(context, pages_to_delete),
             quote=True
         )
