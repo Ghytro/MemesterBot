@@ -1,5 +1,10 @@
 import requests
-from telegram import Update
+import random
+import time
+from telegram import (
+    Update,
+    InputMediaPhoto
+)
 from telegram.ext import (
     Updater,
     CommandHandler,
@@ -24,9 +29,11 @@ def get_token(token_purpose: str) -> str:
     return return_value
 
 def vk_query_response(method: str, **params) -> dict:
-    query = f"https://api.vk.com/method/{method}?v=5.122&access_token={vk_api_token}"
-    for key, value in params.items():
-        query += f"&{key}={value}"
+    query = "https://api.vk.com/method/{_method}?v=5.126&access_token={token}{parameters}".format(
+        _method     = method,
+        token       = vk_api_token,
+        parameters  = "".join([f"&{key}={value}" for key, value in params.items()])
+    )
     return requests.get(query).json()
 
 def show_help(update: Update, context: CallbackContext) -> None:
@@ -36,12 +43,60 @@ def show_help(update: Update, context: CallbackContext) -> None:
         /memepages - Показать список страниц, из которых я могу присылать мемы в эту беседу
         /memepages_add - Добавление страниц(-ы) в список. После вызова этой команды пришлите список коротких имен страниц через пробел
         /memepages_remove - Удалить страницу(-ы) из списка. После вызова этой команды пришлите список коротких имен страниц через пробел
-        /memepages_truncate - Полностью очистить список страниц, из которых я могу присылать мемы в эту беседу""",
+        /memepages_truncate - Полностью очистить список страниц, из которых я могу присылать мемы в эту беседу
+        /memepages_export - Список коротких имен страниц через пробел (не путать с оформленным /memepages) для удобства экспортирования списка в другие группы""",
         quote=True
     )
 
 def send_meme(update: Update, context: CallbackContext) -> None:
-    pass
+    start_time = time.time()
+    if "memepages" not in context.chat_data.keys():
+        update.message.reply_text(
+            "Я не могу отправлять записи, если список пуст. Добавьте страницы в список командой /memepages_add",
+            quote=True
+        )
+        return
+    posts_count = 100
+    random_domain = random.choice(tuple(context.chat_data["memepages"])) #random.choice не поддерживает сеты
+    response = vk_query_response(
+        "wall.get",
+        domain = random_domain,
+        count  = posts_count
+    )
+    if "response" not in response.keys():
+        update.message.reply_text("Сервис недоступен, повторите попытку позже")
+        return
+    posts = [post for post in response["response"]["items"]]
+    if not posts:
+        update.message.reply("Стена одного из сообществ, добавленного в список пока пуста, отправьте команду еще раз")
+        return
+    wall_post = random.choice(posts)
+    try:
+        attachments = wall_post["attachments"]
+    except KeyError:
+        attachments = []
+    photo_urls = [attachment["photo"]["sizes"][-1]["url"] for attachment in attachments if attachment["type"] == "photo"]
+    message_caption = wall_post["text"]+f"\n\nВзято из vk.com/{random_domain}"
+    if not photo_urls:
+        update.message.reply_text(
+            message_caption,
+            quote=True
+        )
+    elif len(photo_urls) == 1:
+        update.message.reply_photo(
+            photo   = photo_urls[0],
+            caption = message_caption,
+            quote   = True
+        )
+    else:
+        media_list = [InputMediaPhoto(media=url) for url in photo_urls]
+        media_list[0].caption = message_caption
+        update.message.reply_media_group(
+            media   = media_list,
+            quote   = True
+        )
+    #benchmarks
+    #print(f"Meme sending query responded in {time.time() - start_time} seconds")
 
 def get_pages_info(screen_names: set) -> list:
     response = vk_query_response(
@@ -118,10 +173,15 @@ def add_memepages_to_chat_info(context: CallbackContext, pages_to_add: set) -> s
         context.chat_data["memepages"] = set()
 
     #находим страницы, которые существуют в вк
-    exist_pages = existing_pages(pages_to_add)
+    pages_info = get_pages_info(pages_to_add)
+    exist_pages = set([page["screen_name"] for page in pages_info])
 
     #несуществующие страницы - те которыe есть в pages_to_add, но нет в exist_pages
     nonexist_pages = pages_to_add.difference(exist_pages)
+
+    #находим и вычитаем закрытые страницы
+    closed_pages = set([page["screen_name"] for page in pages_info if page["is_closed"] == 1])
+    exist_pages.difference_update(closed_pages)
 
     #недобавленные страницы - те, которые уже есть в context.chat_data["memepages"]
     not_added_pages = exist_pages.intersection(context.chat_data["memepages"])
@@ -135,9 +195,12 @@ def add_memepages_to_chat_info(context: CallbackContext, pages_to_add: set) -> s
     #генерируем ответ одной строкой
     reply_str = ""
     if added_pages:
-        reply_str += "{page_addition_case}: {list_of_pages}\n".format(
-            page_addition_case = "Добавлены страницы" if len(added_pages) > 1 else "Добавлена страница",
-            list_of_pages      = ", ".join([page for page in added_pages])
+        if added_pages == pages_to_add:
+            reply_str += "Все указанные страницы добавлены в список"
+        else:
+            reply_str += "{page_addition_case}: {list_of_pages}\n".format(
+                page_addition_case = "Добавлены страницы" if len(added_pages) > 1 else "Добавлена страница",
+                list_of_pages      = ", ".join([page for page in added_pages])
         )
     if not_added_pages:
         reply_str += "{pages_case} {list_of_pages} {were_not_added_case}, потому что уже есть в списке\n".format(
@@ -146,10 +209,17 @@ def add_memepages_to_chat_info(context: CallbackContext, pages_to_add: set) -> s
             were_not_added_case = "не были добавлены" if len(not_added_pages) > 1 else "не была добавлена"
         )
     if nonexist_pages:
-        reply_str += "{pages_case} {list_of_pages} не существует, проверьте правильность написания коротких имен".format(
+        reply_str += "{pages_case} {list_of_pages} не существует, проверьте правильность написания коротких имен\n".format(
             pages_case    = "Страниц" if len(nonexist_pages) > 1 else "Страницы",
             list_of_pages = ",".join([page for page in nonexist_pages])
         )
+    if closed_pages:
+        reply_str += "{pages_case} {list_of_pages} {closed_case}, я не смогу брать оттуда записи\n".format(
+            pages_case    = "Страницы" if len(closed_pages) > 1 else "Страница",
+            list_of_pages = ", ".join(closed_pages),
+            closed_case   = "закрыты" if len(closed_pages) > 1 else "закрыта"
+        )
+
     return reply_str
 
 def delete_memepages_from_chat_info(context: CallbackContext, pages_to_delete: set) -> str:
@@ -183,15 +253,6 @@ def delete_memepages_from_chat_info(context: CallbackContext, pages_to_delete: s
         )
     return reply_str
 
-def existing_pages(memepages: set) -> set:
-    """The function returns a list of existing pages from the given set
-    """
-    vk_api_response = vk_query_response("groups.getById", group_ids=",".join(memepages))
-    try:
-        return set([group["screen_name"] for group in vk_api_response["response"]])
-    except KeyError:
-        return set()
-
 def handle_text_message(update: Update, context: CallbackContext) -> None:
     message_text = update.effective_message.text
     sender_id = update.effective_user.id
@@ -214,16 +275,23 @@ def handle_text_message(update: Update, context: CallbackContext) -> None:
             quote=True
         )
 
+def send_screen_names(update: Update, context: CallbackContext) -> None:
+    update.message.reply_text(
+        " ".join(context.chat_data["memepages"]),
+        quote=True
+    )
+
 def main() -> None:
     updater = Updater(bot_token, use_context=True)
     dispatcher = updater.dispatcher
 
     dispatcher.add_handler(CommandHandler("help", show_help))
-    dispatcher.add_handler(CommandHandler("meme", send_meme))
+    dispatcher.add_handler(CommandHandler("meme", send_meme, run_async=True)) #too slow query to run without async
     dispatcher.add_handler(CommandHandler("memepages", show_memepages))
     dispatcher.add_handler(CommandHandler("memepages_add", add_memepages))
     dispatcher.add_handler(CommandHandler("memepages_remove", remove_memepages))
     dispatcher.add_handler(CommandHandler("memepages_truncate", truncate_memepages))
+    dispatcher.add_handler(CommandHandler("memepages_export", send_screen_names))
     dispatcher.add_handler(MessageHandler(Filters.text, handle_text_message))
 
     updater.start_polling()
