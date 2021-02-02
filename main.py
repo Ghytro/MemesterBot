@@ -66,7 +66,11 @@ def send_meme(update: Update, context: CallbackContext) -> None:
     if "response" not in response.keys():
         update.message.reply_text("Сервис недоступен, повторите попытку позже")
         return
-    posts = [post for post in response["response"]["items"]]
+    try:
+        posts = [post for post in response["response"]["items"] if post["marked_as_ads"] == 0]
+    except KeyError:
+        print("no marked as ads")
+        posts = [post for post in response["response"]["items"]]
     if not posts:
         update.message.reply("Стена одного из сообществ, добавленного в список пока пуста, отправьте команду еще раз")
         return
